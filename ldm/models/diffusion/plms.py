@@ -1,9 +1,10 @@
+# pylint: disable=unused-argument,unused-variable
+
 """SAMPLING ONLY."""
 
 import torch
 import numpy as np
 from tqdm import tqdm
-from functools import partial
 
 from ldm.modules.diffusionmodules.util import make_ddim_sampling_parameters, make_ddim_timesteps, noise_like
 
@@ -15,8 +16,17 @@ class PLMSSampler(object):
         self.ddpm_num_timesteps = model.num_timesteps
         self.schedule = schedule
 
+        self.alphas_cumprod_prev: torch.Tensor
+        self.alphas_cumprod: torch.Tensor
+        self.alphas_cumprod: torch.Tensor
+        self.alphas_cumprod_prev: torch.Tensor
+        self.ddim_alphas: torch.Tensor
+        self.ddim_alphas_prev: torch.Tensor
+        self.ddim_sqrt_one_minus_alphas: torch.Tensor
+        self.ddim_sigmas: torch.Tensor
+
     def register_buffer(self, name, attr):
-        if type(attr) == torch.Tensor:
+        if isinstance(attr, torch.Tensor):
             if attr.device != torch.device("cuda"):
                 attr = attr.to(torch.device("cuda"))
         setattr(self, name, attr)
@@ -28,7 +38,7 @@ class PLMSSampler(object):
                                                   num_ddpm_timesteps=self.ddpm_num_timesteps,verbose=verbose)
         alphas_cumprod = self.model.alphas_cumprod
         assert alphas_cumprod.shape[0] == self.ddpm_num_timesteps, 'alphas have to be defined for each timestep'
-        to_torch = lambda x: x.clone().detach().to(torch.float32).to(self.model.device)
+        def to_torch(x): return x.clone().detach().to(torch.float32).to(self.model.device)
 
         self.register_buffer('betas', to_torch(self.model.betas))
         self.register_buffer('alphas_cumprod', to_torch(alphas_cumprod))
@@ -133,7 +143,7 @@ class PLMSSampler(object):
 
         intermediates = {'x_inter': [img], 'pred_x0': [img]}
         time_range = list(reversed(range(0,timesteps))) if ddim_use_original_steps else np.flip(timesteps)
-        total_steps = timesteps if ddim_use_original_steps else timesteps.shape[0]
+        total_steps: int = timesteps if ddim_use_original_steps else timesteps.shape[0] # type: ignore
         print(f"Running PLMS Sampling with {total_steps} timesteps")
 
         iterator = tqdm(time_range, desc='PLMS Sampler', total=total_steps)
@@ -171,8 +181,8 @@ class PLMSSampler(object):
 
     @torch.no_grad()
     def p_sample_plms(self, x, c, t, index, repeat_noise=False, use_original_steps=False, quantize_denoised=False,
-                      temperature=1., noise_dropout=0., score_corrector=None, corrector_kwargs=None,
-                      unconditional_guidance_scale=1., unconditional_conditioning=None, old_eps=None, t_next=None):
+                      temperature=1., noise_dropout=0., score_corrector=None, corrector_kwargs:dict|None=None,
+                      unconditional_guidance_scale=1., unconditional_conditioning=None, old_eps:list|None=None, t_next=None):
         b, *_, device = *x.shape, x.device
 
         def get_model_output(x, t):
@@ -187,7 +197,7 @@ class PLMSSampler(object):
 
             if score_corrector is not None:
                 assert self.model.parameterization == "eps"
-                e_t = score_corrector.modify_score(self.model, e_t, x, t, c, **corrector_kwargs)
+                e_t = score_corrector.modify_score(self.model, e_t, x, t, c, **(corrector_kwargs or {}))
 
             return e_t
 
@@ -198,10 +208,10 @@ class PLMSSampler(object):
 
         def get_x_prev_and_pred_x0(e_t, index):
             # select parameters corresponding to the currently considered timestep
-            a_t = torch.full((b, 1, 1, 1), alphas[index], device=device)
-            a_prev = torch.full((b, 1, 1, 1), alphas_prev[index], device=device)
-            sigma_t = torch.full((b, 1, 1, 1), sigmas[index], device=device)
-            sqrt_one_minus_at = torch.full((b, 1, 1, 1), sqrt_one_minus_alphas[index],device=device)
+            a_t = torch.full((b, 1, 1, 1), alphas[index], device=device) # type: ignore
+            a_prev = torch.full((b, 1, 1, 1), alphas_prev[index], device=device) # type: ignore
+            sigma_t = torch.full((b, 1, 1, 1), sigmas[index], device=device) # type: ignore
+            sqrt_one_minus_at = torch.full((b, 1, 1, 1), sqrt_one_minus_alphas[index], device=device) # type: ignore
 
             # current prediction for x_0
             pred_x0 = (x - sqrt_one_minus_at * e_t) / a_t.sqrt()
@@ -215,6 +225,7 @@ class PLMSSampler(object):
             x_prev = a_prev.sqrt() * pred_x0 + dir_xt + noise
             return x_prev, pred_x0
 
+        assert old_eps is not None
         e_t = get_model_output(x, t)
         if len(old_eps) == 0:
             # Pseudo Improved Euler (2nd order)
@@ -230,6 +241,8 @@ class PLMSSampler(object):
         elif len(old_eps) >= 3:
             # 4nd order Pseudo Linear Multistep (Adams-Bashforth)
             e_t_prime = (55 * e_t - 59 * old_eps[-1] + 37 * old_eps[-2] - 9 * old_eps[-3]) / 24
+        else:
+            raise ValueError(f'Unexpected number of old_eps {len(old_eps)}')
 
         x_prev, pred_x0 = get_x_prev_and_pred_x0(e_t_prime, index)
 

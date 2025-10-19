@@ -1,11 +1,16 @@
+# pylint: disable=unused-variable,unused-argument
+
 """shout-out to https://github.com/lucidrains/x-transformers/tree/main/x_transformers"""
-import torch
-from torch import nn, einsum
-import torch.nn.functional as F
+
 from functools import partial
 from inspect import isfunction
 from collections import namedtuple
-from einops import rearrange, repeat, reduce
+from collections.abc import Callable
+from typing import TypeGuard, TypeVar, cast
+import torch
+from torch import nn, einsum
+import torch.nn.functional as F
+from einops import rearrange, repeat
 
 # constants
 
@@ -41,6 +46,7 @@ class FixedPositionalEmbedding(nn.Module):
         super().__init__()
         inv_freq = 1. / (10000 ** (torch.arange(0, dim, 2).float() / dim))
         self.register_buffer('inv_freq', inv_freq)
+        self.inv_freq: torch.Tensor
 
     def forward(self, x, seq_dim=1, offset=0):
         t = torch.arange(x.shape[seq_dim], device=x.device).type_as(self.inv_freq) + offset
@@ -51,14 +57,15 @@ class FixedPositionalEmbedding(nn.Module):
 
 # helpers
 
-def exists(val):
+T = TypeVar('T')
+def exists(val: T | None) -> TypeGuard[T]:
     return val is not None
 
 
-def default(val, d):
+def default(val: T | None, d: T | Callable[[],T]) -> T:
     if exists(val):
         return val
-    return d() if isfunction(d) else d
+    return cast(T, d() if isfunction(d) else d)
 
 
 def always(val):
@@ -86,7 +93,7 @@ def max_neg_value(tensor):
 # keyword argument helpers
 
 def pick_and_pop(keys, d):
-    values = list(map(lambda key: d.pop(key), keys))
+    values = list(map(d.pop, keys))
     return dict(zip(keys, values))
 
 
@@ -99,8 +106,8 @@ def group_dict_by_key(cond, d):
     return (*return_val,)
 
 
-def string_begins_with(prefix, str):
-    return str.startswith(prefix)
+def string_begins_with(prefix, string):
+    return string.startswith(prefix)
 
 
 def group_by_key_prefix(prefix, d):
@@ -188,7 +195,7 @@ class GEGLU(nn.Module):
 
     def forward(self, x):
         x, gate = self.proj(x).chunk(2, dim=-1)
-        return x * F.gelu(gate)
+        return x * F.gelu(gate) # pylint: disable=not-callable
 
 
 class FeedForward(nn.Module):
@@ -196,6 +203,7 @@ class FeedForward(nn.Module):
         super().__init__()
         inner_dim = int(dim * mult)
         dim_out = default(dim_out, dim)
+        assert dim_out is not None
         project_in = nn.Sequential(
             nn.Linear(dim, inner_dim),
             nn.GELU()
@@ -284,6 +292,7 @@ class Attention(nn.Module):
         v_input = kv_input
 
         if exists(mem):
+            assert exists(k_input) and exists(v_input)
             k_input = torch.cat((mem, k_input), dim=-2)
             v_input = torch.cat((mem, v_input), dim=-2)
 
@@ -396,7 +405,7 @@ class AttentionLayers(nn.Module):
         ff_kwargs, kwargs = groupby_prefix_and_trim('ff_', kwargs)
         attn_kwargs, _ = groupby_prefix_and_trim('attn_', kwargs)
 
-        dim_head = attn_kwargs.get('dim_head', DEFAULT_DIM_HEAD)
+        # dim_head = attn_kwargs.get('dim_head', DEFAULT_DIM_HEAD)
 
         self.dim = dim
         self.depth = depth
@@ -462,10 +471,10 @@ class AttentionLayers(nn.Module):
                 layer = FeedForward(dim, **ff_kwargs)
                 layer = layer if not macaron else Scale(0.5, layer)
             else:
-                raise Exception(f'invalid layer type {layer_type}')
+                raise TypeError(f'invalid layer type {layer_type}')
 
             if isinstance(layer, Attention) and exists(branch_fn):
-                layer = branch_fn(layer)
+                layer = branch_fn(layer) # pylint: disable=not-callable
 
             if gate_residual:
                 residual_fn = GRUGating(dim)
@@ -494,7 +503,7 @@ class AttentionLayers(nn.Module):
 
         mems = mems.copy() if exists(mems) else [None] * self.num_attn_layers
 
-        for ind, (layer_type, (norm, block, residual_fn)) in enumerate(zip(self.layer_types, self.layers)):
+        for ind, (layer_type, (norm, block, residual_fn)) in enumerate(zip(self.layer_types, self.layers)): # type: ignore
             is_last = ind == (len(self.layers) - 1)
 
             if layer_type == 'a':
@@ -508,21 +517,23 @@ class AttentionLayers(nn.Module):
 
             if layer_type == 'a':
                 out, inter = block(x, mask=mask, sinusoidal_emb=self.pia_pos_emb, rel_pos=self.rel_pos,
-                                   prev_attn=prev_attn, mem=layer_mem)
+                                   prev_attn=prev_attn, mem=layer_mem) # type: ignore
             elif layer_type == 'c':
                 out, inter = block(x, context=context, mask=mask, context_mask=context_mask, prev_attn=prev_cross_attn)
             elif layer_type == 'f':
                 out = block(x)
+            else:
+                raise TypeError(f'invalid layer type {layer_type}')
 
             x = residual_fn(out, residual)
 
             if layer_type in ('a', 'c'):
-                intermediates.append(inter)
+                intermediates.append(inter) # type: ignore # pylint: disable=E0606
 
             if layer_type == 'a' and self.residual_attn:
-                prev_attn = inter.pre_softmax_attn
+                prev_attn = inter.pre_softmax_attn # type: ignore
             elif layer_type == 'c' and self.cross_residual_attn:
-                prev_cross_attn = inter.pre_softmax_attn
+                prev_cross_attn = inter.pre_softmax_attn # type: ignore
 
             if not self.pre_norm and not is_last:
                 x = norm(x)
@@ -555,7 +566,7 @@ class TransformerWrapper(nn.Module):
             emb_dim=None,
             max_mem_len=0.,
             emb_dropout=0.,
-            num_memory_tokens=None,
+            num_memory_tokens:int|None=None,
             tie_embedding=False,
             use_pos_emb=True
     ):
@@ -590,14 +601,14 @@ class TransformerWrapper(nn.Module):
 
             # let funnel encoder know number of memory tokens, if specified
             if hasattr(attn_layers, 'num_memory_tokens'):
-                attn_layers.num_memory_tokens = num_memory_tokens
+                attn_layers.num_memory_tokens = num_memory_tokens # type: ignore
 
     def init_(self):
         nn.init.normal_(self.token_emb.weight, std=0.02)
 
     def forward(
             self,
-            x,
+            x: torch.Tensor,
             return_embeddings=False,
             mask=None,
             return_mems=False,
@@ -638,4 +649,3 @@ class TransformerWrapper(nn.Module):
             return out, attn_maps
 
         return out
-

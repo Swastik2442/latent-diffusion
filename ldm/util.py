@@ -1,16 +1,14 @@
 import importlib
-
-import torch
-import numpy as np
 from collections import abc
-from einops import rearrange
-from functools import partial
-
+from typing import TypeGuard, TypeVar, cast
 import multiprocessing as mp
 from threading import Thread
 from queue import Queue
-
 from inspect import isfunction
+
+import torch
+import numpy as np
+
 from PIL import Image, ImageDraw, ImageFont
 
 
@@ -50,14 +48,15 @@ def isimage(x):
     return (len(x.shape) == 4) and (x.shape[1] == 3 or x.shape[1] == 1)
 
 
-def exists(x):
-    return x is not None
+T = TypeVar('T')
+def exists(val: T | None) -> TypeGuard[T]:
+    return val is not None
 
 
-def default(val, d):
+def default(val: T | None, d: T | abc.Callable[[],T]) -> T:
     if exists(val):
         return val
-    return d() if isfunction(d) else d
+    return cast(T, d() if isfunction(d) else d)
 
 
 def mean_flat(tensor):
@@ -106,7 +105,7 @@ def _do_parallel_data_prefetch(func, Q, data, idx, idx_to_fn=False):
 
 
 def parallel_data_prefetch(
-        func: callable, data, n_proc, target_data_type="ndarray", cpu_intensive=True, use_worker_id=False
+        func: abc.Callable, data, n_proc, target_data_type="ndarray", cpu_intensive=True, use_worker_id=False
 ):
     # if target_data_type not in ["ndarray", "list"]:
     #     raise ValueError(
@@ -117,7 +116,7 @@ def parallel_data_prefetch(
     elif isinstance(data, abc.Iterable):
         if isinstance(data, dict):
             print(
-                f'WARNING:"data" argument passed to parallel_data_prefetch is a dict: Using only its values and disregarding keys.'
+                'WARNING:"data" argument passed to parallel_data_prefetch is a dict: Using only its values and disregarding keys.'
             )
             data = list(data.values())
         if target_data_type == "ndarray":
@@ -159,7 +158,7 @@ def parallel_data_prefetch(
         processes += [p]
 
     # start processes
-    print(f"Start prefetching...")
+    print("Start prefetching...")
     import time
 
     start = time.time()

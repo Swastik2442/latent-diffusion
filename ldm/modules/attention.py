@@ -1,4 +1,8 @@
+# pylint: disable=unused-variable
+
 from inspect import isfunction
+from collections.abc import Callable
+from typing import TypeGuard, TypeVar, cast
 import math
 import torch
 import torch.nn.functional as F
@@ -7,8 +11,8 @@ from einops import rearrange, repeat
 
 from ldm.modules.diffusionmodules.util import checkpoint
 
-
-def exists(val):
+T = TypeVar('T')
+def exists(val: T | None) -> TypeGuard[T]:
     return val is not None
 
 
@@ -16,10 +20,10 @@ def uniq(arr):
     return{el: True for el in arr}.keys()
 
 
-def default(val, d):
+def default(val: T | None, d: T | Callable[[],T]) -> T:
     if exists(val):
         return val
-    return d() if isfunction(d) else d
+    return cast(T, d() if isfunction(d) else d)
 
 
 def max_neg_value(t):
@@ -41,11 +45,11 @@ class GEGLU(nn.Module):
 
     def forward(self, x):
         x, gate = self.proj(x).chunk(2, dim=-1)
-        return x * F.gelu(gate)
+        return x * F.gelu(gate) # pylint: disable=E1102
 
 
 class FeedForward(nn.Module):
-    def __init__(self, dim, dim_out=None, mult=4, glu=False, dropout=0.):
+    def __init__(self, dim: int, dim_out: int | None=None, mult: int=4, glu: bool=False, dropout:float=0.):
         super().__init__()
         inner_dim = int(dim * mult)
         dim_out = default(dim_out, dim)
@@ -89,7 +93,7 @@ class LinearAttention(nn.Module):
         b, c, h, w = x.shape
         qkv = self.to_qkv(x)
         q, k, v = rearrange(qkv, 'b (qkv heads c) h w -> qkv b heads c (h w)', heads = self.heads, qkv=3)
-        k = k.softmax(dim=-1)  
+        k = k.softmax(dim=-1)
         context = torch.einsum('bhdn,bhen->bhde', k, v)
         out = torch.einsum('bhde,bhdn->bhen', context, q)
         out = rearrange(out, 'b heads c (h w) -> b (heads c) h w', heads=self.heads, h=h, w=w)

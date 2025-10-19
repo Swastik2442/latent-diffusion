@@ -1,9 +1,9 @@
+from functools import partial
 import torch
 import torch.nn as nn
-from functools import partial
-import clip
-from einops import rearrange, repeat
+from einops import repeat
 import kornia
+import clip
 
 
 from ldm.modules.x_transformer import Encoder, TransformerWrapper  # TODO: can we directly rely on lucidrains code and simply add this as a reuirement? --> test
@@ -199,4 +199,3 @@ class FrozenClipImageEmbedder(nn.Module):
     def forward(self, x):
         # x is assumed to be in range [-1,1]
         return self.model.encode_image(self.preprocess(x))
-

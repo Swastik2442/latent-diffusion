@@ -1,13 +1,16 @@
+# pylint: disable=unused-argument,unused-variable,arguments-differ
+
 import os
+from copy import deepcopy
+from glob import glob
+
 import torch
-import pytorch_lightning as pl
-from omegaconf import OmegaConf
 from torch.nn import functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
-from copy import deepcopy
+import pytorch_lightning as pl
+from omegaconf import OmegaConf
 from einops import rearrange
-from glob import glob
 from natsort import natsorted
 
 from ldm.modules.diffusionmodules.openaimodel import EncoderUNetModel, UNetModel
@@ -30,6 +33,7 @@ class NoisyLatentImageClassifier(pl.LightningModule):
     def __init__(self,
                  diffusion_path,
                  num_classes,
+                 *args,
                  ckpt_path=None,
                  pool='attention',
                  label_key=None,
@@ -38,7 +42,6 @@ class NoisyLatentImageClassifier(pl.LightningModule):
                  weight_decay=1.e-2,
                  log_steps=10,
                  monitor='val/loss',
-                 *args,
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.num_classes = num_classes
@@ -66,8 +69,11 @@ class NoisyLatentImageClassifier(pl.LightningModule):
         self.scheduler_config = scheduler_config
         self.use_scheduler = self.scheduler_config is not None
         self.weight_decay = weight_decay
+        self.learning_rate: float | torch.Tensor
 
-    def init_from_ckpt(self, path, ignore_keys=list(), only_model=False):
+    def init_from_ckpt(self, path, ignore_keys:list|None=None, only_model=False):
+        if ignore_keys is None:
+            ignore_keys = []
         sd = torch.load(path, map_location="cpu")
         if "state_dict" in list(sd.keys()):
             sd = sd["state_dict"]
@@ -75,7 +81,7 @@ class NoisyLatentImageClassifier(pl.LightningModule):
         for k in keys:
             for ik in ignore_keys:
                 if k.startswith(ik):
-                    print("Deleting key {} from state_dict.".format(k))
+                    print(f"Deleting key {k} from state_dict.")
                     del sd[k]
         missing, unexpected = self.load_state_dict(sd, strict=False) if not only_model else self.model.load_state_dict(
             sd, strict=False)
@@ -87,6 +93,7 @@ class NoisyLatentImageClassifier(pl.LightningModule):
 
     def load_diffusion(self):
         model = instantiate_from_config(self.diffusion_config)
+        assert model is not None
         self.diffusion_model = model.eval()
         self.diffusion_model.train = disabled_train
         for param in self.diffusion_model.parameters():
@@ -99,6 +106,7 @@ class NoisyLatentImageClassifier(pl.LightningModule):
         if self.label_key == 'class_label':
             model_config.pool = pool
 
+        assert self.label_key is not None
         self.model = __models__[self.label_key](**model_config)
         if ckpt_path is not None:
             print('#####################################################################')
@@ -173,7 +181,9 @@ class NoisyLatentImageClassifier(pl.LightningModule):
         self.log_dict(log, prog_bar=False, logger=True, on_step=self.training, on_epoch=True)
         self.log('loss', log[f"{log_prefix}/loss"], prog_bar=True, logger=False)
         self.log('global_step', self.global_step, logger=False, on_epoch=False, prog_bar=True)
-        lr = self.optimizers().param_groups[0]['lr']
+        opt = self.optimizers()
+        assert isinstance(opt, torch.optim.Optimizer)
+        lr = opt.param_groups[0]['lr']
         self.log('lr_abs', lr, on_step=True, logger=True, on_epoch=False, prog_bar=True)
 
     def shared_step(self, batch, t=None):
@@ -217,11 +227,12 @@ class NoisyLatentImageClassifier(pl.LightningModule):
 
         return loss
 
-    def configure_optimizers(self):
+    def configure_optimizers(self): # type: ignore
         optimizer = AdamW(self.model.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
 
         if self.use_scheduler:
             scheduler = instantiate_from_config(self.scheduler_config)
+            assert scheduler is not None
 
             print("Setting up LambdaLR scheduler...")
             scheduler = [
@@ -235,7 +246,7 @@ class NoisyLatentImageClassifier(pl.LightningModule):
         return optimizer
 
     @torch.no_grad()
-    def log_images(self, batch, N=8, *args, **kwargs):
+    def log_images(self, batch, *args, N=8, **kwargs):
         log = dict()
         x = self.get_input(batch, self.diffusion_model.first_stage_key)
         log['inputs'] = x
@@ -256,7 +267,7 @@ class NoisyLatentImageClassifier(pl.LightningModule):
 
                 log[f'inputs@t{current_time}'] = x_noisy
 
-                pred = F.one_hot(logits.argmax(dim=1), num_classes=self.num_classes)
+                pred = F.one_hot(logits.argmax(dim=1), num_classes=self.num_classes) # pylint: disable=not-callable
                 pred = rearrange(pred, 'b h w c -> b c h w')
 
                 log[f'pred@t{current_time}'] = self.diffusion_model.to_rgb(pred)

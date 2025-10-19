@@ -117,10 +117,10 @@ def shift_pixel(x, sf, upper_left=True):
     y1 = np.clip(y1, 0, h - 1)
 
     if x.ndim == 2:
-        x = interp2d(xv, yv, x)(x1, y1)
+        x = interp2d(xv, yv, x)(x1, y1) # pylint: disable=not-callable
     if x.ndim == 3:
         for i in range(x.shape[-1]):
-            x[:, :, i] = interp2d(xv, yv, x[:, :, i])(x1, y1)
+            x[:, :, i] = interp2d(xv, yv, x[:, :, i])(x1, y1) # pylint: disable=not-callable
 
     return x
 
@@ -136,7 +136,7 @@ def blur(x, k):
     k = k.repeat(1, c, 1, 1)
     k = k.view(-1, 1, k.shape[2], k.shape[3])
     x = x.view(1, -1, x.shape[2], x.shape[3])
-    x = torch.nn.functional.conv2d(x, k, bias=None, stride=1, padding=0, groups=n * c)
+    x = torch.nn.functional.conv2d(x, k, bias=None, stride=1, padding=0, groups=n * c) # pylint: disable=not-callable
     x = x.view(n, c, x.shape[2], x.shape[3])
 
     return x

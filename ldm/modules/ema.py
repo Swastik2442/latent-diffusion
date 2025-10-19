@@ -12,6 +12,8 @@ class LitEma(nn.Module):
         self.register_buffer('decay', torch.tensor(decay, dtype=torch.float32))
         self.register_buffer('num_updates', torch.tensor(0,dtype=torch.int) if use_num_upates
                              else torch.tensor(-1,dtype=torch.int))
+        self.decay: torch.Tensor
+        self.num_updates: torch.Tensor
 
         for name, p in model.named_parameters():
             if p.requires_grad:

@@ -16,7 +16,7 @@ class LSUNBase(Dataset):
                  ):
         self.data_paths = txt_file
         self.data_root = data_root
-        with open(self.data_paths, "r") as f:
+        with open(self.data_paths, "r", encoding='utf-8') as f:
             self.image_paths = f.read().splitlines()
         self._length = len(self.image_paths)
         self.labels = {

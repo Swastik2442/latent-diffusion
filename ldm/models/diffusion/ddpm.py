@@ -1,3 +1,5 @@
+# pylint: disable=unused-argument,unused-variable,arguments-differ,arguments-renamed
+
 """
 wild mixture of
 https://github.com/lucidrains/denoising-diffusion-pytorch/blob/7706bdfc6f527f58d33f84b7b522e61e6e3164b3/denoising_diffusion_pytorch/denoising_diffusion_pytorch.py
@@ -6,17 +8,17 @@ https://github.com/CompVis/taming-transformers
 -- merci
 """
 
-import torch
-import torch.nn as nn
-import numpy as np
-import pytorch_lightning as pl
-from torch.optim.lr_scheduler import LambdaLR
-from einops import rearrange, repeat
 from contextlib import contextmanager
 from functools import partial
+import torch
+import torch.nn as nn
+from torch.optim.lr_scheduler import LambdaLR
+import numpy as np
+import pytorch_lightning as pl
+from einops import rearrange, repeat
 from tqdm import tqdm
 from torchvision.utils import make_grid
-from pytorch_lightning.utilities.distributed import rank_zero_only
+from pytorch_lightning.utilities import rank_zero_only
 
 from ldm.util import log_txt_as_img, exists, default, ismap, isimage, mean_flat, count_params, instantiate_from_config
 from ldm.modules.ema import LitEma
@@ -49,7 +51,7 @@ class DDPM(pl.LightningModule):
                  beta_schedule="linear",
                  loss_type="l2",
                  ckpt_path=None,
-                 ignore_keys=[],
+                 ignore_keys:list|None=None,
                  load_only_unet=False,
                  monitor="val/loss",
                  use_ema=True,
@@ -101,6 +103,8 @@ class DDPM(pl.LightningModule):
         if monitor is not None:
             self.monitor = monitor
         if ckpt_path is not None:
+            if ignore_keys is None:
+                ignore_keys = []
             self.init_from_ckpt(ckpt_path, ignore_keys=ignore_keys, only_model=load_only_unet)
 
         self.register_schedule(given_betas=given_betas, beta_schedule=beta_schedule, timesteps=timesteps,
@@ -112,6 +116,13 @@ class DDPM(pl.LightningModule):
         self.logvar = torch.full(fill_value=logvar_init, size=(self.num_timesteps,))
         if self.learn_logvar:
             self.logvar = nn.Parameter(self.logvar, requires_grad=True)
+
+        self.learning_rate: float | torch.Tensor
+        self.betas: torch.Tensor
+        self.posterior_variance: torch.Tensor
+        self.alphas_cumprod: torch.Tensor
+        self.lvlb_weights: torch.Tensor
+        self.split_input_params: dict
 
 
     def register_schedule(self, given_betas=None, beta_schedule="linear", timesteps=1000,
@@ -183,7 +194,9 @@ class DDPM(pl.LightningModule):
                 if context is not None:
                     print(f"{context}: Restored training weights")
 
-    def init_from_ckpt(self, path, ignore_keys=list(), only_model=False):
+    def init_from_ckpt(self, path, ignore_keys:list|None=None, only_model=False):
+        if ignore_keys is None:
+            ignore_keys = []
         sd = torch.load(path, map_location="cpu")
         if "state_dict" in list(sd.keys()):
             sd = sd["state_dict"]
@@ -191,7 +204,7 @@ class DDPM(pl.LightningModule):
         for k in keys:
             for ik in ignore_keys:
                 if k.startswith(ik):
-                    print("Deleting key {} from state_dict.".format(k))
+                    print(f"Deleting key {k} from state_dict.")
                     del sd[k]
         missing, unexpected = self.load_state_dict(sd, strict=False) if not only_model else self.model.load_state_dict(
             sd, strict=False)
@@ -208,7 +221,7 @@ class DDPM(pl.LightningModule):
         :param t: the number of diffusion steps (minus 1). Here, 0 means one step.
         :return: A tuple (mean, variance, log_variance), all of x_start's shape.
         """
-        mean = (extract_into_tensor(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start)
+        mean = extract_into_tensor(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start
         variance = extract_into_tensor(1.0 - self.alphas_cumprod, t, x_start.shape)
         log_variance = extract_into_tensor(self.log_one_minus_alphas_cumprod, t, x_start.shape)
         return mean, variance, log_variance
@@ -234,6 +247,9 @@ class DDPM(pl.LightningModule):
             x_recon = self.predict_start_from_noise(x, t=t, noise=model_out)
         elif self.parameterization == "x0":
             x_recon = model_out
+        else:
+            raise NotImplementedError(f"Parameterization {self.parameterization} not yet supported")
+
         if clip_denoised:
             x_recon.clamp_(-1., 1.)
 
@@ -274,7 +290,7 @@ class DDPM(pl.LightningModule):
     def q_sample(self, x_start, t, noise=None):
         noise = default(noise, lambda: torch.randn_like(x_start))
         return (extract_into_tensor(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start +
-                extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise)
+                extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise) # type: ignore
 
     def get_loss(self, pred, target, mean=True):
         if self.loss_type == 'l1':
@@ -349,7 +365,9 @@ class DDPM(pl.LightningModule):
                  prog_bar=True, logger=True, on_step=True, on_epoch=False)
 
         if self.use_scheduler:
-            lr = self.optimizers().param_groups[0]['lr']
+            opt = self.optimizers()
+            assert isinstance(opt, torch.optim.Optimizer)
+            lr = opt.param_groups[0]['lr']
             self.log('lr_abs', lr, prog_bar=True, logger=True, on_step=True, on_epoch=False)
 
         return loss
@@ -426,6 +444,7 @@ class LatentDiffusion(DDPM):
     def __init__(self,
                  first_stage_config,
                  cond_stage_config,
+                 *args,
                  num_timesteps_cond=None,
                  cond_stage_key="image",
                  cond_stage_trainable=False,
@@ -434,7 +453,7 @@ class LatentDiffusion(DDPM):
                  conditioning_key=None,
                  scale_factor=1.0,
                  scale_by_std=False,
-                 *args, **kwargs):
+                 **kwargs):
         self.num_timesteps_cond = default(num_timesteps_cond, 1)
         self.scale_by_std = scale_by_std
         assert self.num_timesteps_cond <= kwargs['timesteps']
@@ -451,7 +470,7 @@ class LatentDiffusion(DDPM):
         self.cond_stage_key = cond_stage_key
         try:
             self.num_downs = len(first_stage_config.params.ddconfig.ch_mult) - 1
-        except:
+        except TypeError:
             self.num_downs = 0
         if not scale_by_std:
             self.scale_factor = scale_factor
@@ -461,7 +480,7 @@ class LatentDiffusion(DDPM):
         self.instantiate_cond_stage(cond_stage_config)
         self.cond_stage_forward = cond_stage_forward
         self.clip_denoised = False
-        self.bbox_tokenizer = None  
+        self.bbox_tokenizer = None
 
         self.restarted_from_ckpt = False
         if ckpt_path is not None:
@@ -475,7 +494,7 @@ class LatentDiffusion(DDPM):
 
     @rank_zero_only
     @torch.no_grad()
-    def on_train_batch_start(self, batch, batch_idx, dataloader_idx):
+    def on_train_batch_start(self, batch, batch_idx, dataloader_idx): # type: ignore
         # only for very first batch
         if self.scale_by_std and self.current_epoch == 0 and self.global_step == 0 and batch_idx == 0 and not self.restarted_from_ckpt:
             assert self.scale_factor == 1., 'rather not use custom rescaling and std-rescaling simultaneously'
@@ -495,12 +514,14 @@ class LatentDiffusion(DDPM):
                           linear_start=1e-4, linear_end=2e-2, cosine_s=8e-3):
         super().register_schedule(given_betas, beta_schedule, timesteps, linear_start, linear_end, cosine_s)
 
+        assert self.num_timesteps_cond is not None
         self.shorten_cond_schedule = self.num_timesteps_cond > 1
         if self.shorten_cond_schedule:
             self.make_cond_schedule()
 
     def instantiate_first_stage(self, config):
         model = instantiate_from_config(config)
+        assert model is not None
         self.first_stage_model = model.eval()
         self.first_stage_model.train = disabled_train
         for param in self.first_stage_model.parameters():
@@ -517,6 +538,7 @@ class LatentDiffusion(DDPM):
                 # self.be_unconditional = True
             else:
                 model = instantiate_from_config(config)
+                assert model is not None
                 self.cond_stage_model = model.eval()
                 self.cond_stage_model.train = disabled_train
                 for param in self.cond_stage_model.parameters():
@@ -550,6 +572,7 @@ class LatentDiffusion(DDPM):
 
     def get_learned_conditioning(self, c):
         if self.cond_stage_forward is None:
+            assert self.cond_stage_model is not None
             if hasattr(self.cond_stage_model, 'encode') and callable(self.cond_stage_model.encode):
                 c = self.cond_stage_model.encode(c)
                 if isinstance(c, DiagonalGaussianDistribution):
@@ -577,20 +600,20 @@ class LatentDiffusion(DDPM):
         """
         lower_right_corner = torch.tensor([h - 1, w - 1]).view(1, 1, 2)
         arr = self.meshgrid(h, w) / lower_right_corner
-        dist_left_up = torch.min(arr, dim=-1, keepdims=True)[0]
-        dist_right_down = torch.min(1 - arr, dim=-1, keepdims=True)[0]
+        dist_left_up = torch.min(arr, dim=-1, keepdims=True)[0] # type: ignore
+        dist_right_down = torch.min(1 - arr, dim=-1, keepdims=True)[0] # type: ignore
         edge_dist = torch.min(torch.cat([dist_left_up, dist_right_down], dim=-1), dim=-1)[0]
         return edge_dist
 
     def get_weighting(self, h, w, Ly, Lx, device):
         weighting = self.delta_border(h, w)
-        weighting = torch.clip(weighting, self.split_input_params["clip_min_weight"],
+        weighting = torch.clip(weighting, self.split_input_params["clip_min_weight"], # pylint: disable=not-callable
                                self.split_input_params["clip_max_weight"], )
         weighting = weighting.view(1, h * w, 1).repeat(1, 1, Ly * Lx).to(device)
 
         if self.split_input_params["tie_braker"]:
             L_weighting = self.delta_border(Ly, Lx)
-            L_weighting = torch.clip(L_weighting,
+            L_weighting = torch.clip(L_weighting, # pylint: disable=not-callable
                                      self.split_input_params["clip_min_tie_weight"],
                                      self.split_input_params["clip_max_tie_weight"])
 
@@ -660,6 +683,7 @@ class LatentDiffusion(DDPM):
         encoder_posterior = self.encode_first_stage(x)
         z = self.get_first_stage_encoding(encoder_posterior).detach()
 
+        assert not isinstance(self.compute_latent_shifts, torch.Tensor)
         if self.model.conditioning_key is not None:
             if cond_key is None:
                 cond_key = self.cond_stage_key
@@ -680,6 +704,7 @@ class LatentDiffusion(DDPM):
                     c = self.get_learned_conditioning(xc.to(self.device))
             else:
                 c = xc
+            assert isinstance(c, torch.Tensor)
             if bs is not None:
                 c = c[:bs]
 
@@ -694,7 +719,7 @@ class LatentDiffusion(DDPM):
             if self.use_positional_encodings:
                 pos_x, pos_y = self.compute_latent_shifts(batch)
                 c = {'pos_x': pos_x, 'pos_y': pos_y}
-        out = [z, c]
+        out: list = [z, c]
         if return_first_stage_outputs:
             xrec = self.decode_first_stage(z)
             out.extend([x, xrec])
@@ -742,7 +767,7 @@ class LatentDiffusion(DDPM):
                     output_list = [self.first_stage_model.decode(z[:, :, :, :, i])
                                    for i in range(z.shape[-1])]
 
-                o = torch.stack(output_list, axis=-1)  # # (bn, nc, ks[0], ks[1], L)
+                o = torch.stack(output_list, dim=-1)  # # (bn, nc, ks[0], ks[1], L)
                 o = o * weighting
                 # Reverse 1. reshape to img shape
                 o = o.view((o.shape[0], -1, o.shape[-1]))  # (bn, nc * ks[0] * ks[1], L)
@@ -793,7 +818,7 @@ class LatentDiffusion(DDPM):
                 z = z.view((z.shape[0], -1, ks[0], ks[1], z.shape[-1]))  # (bn, nc, ks[0], ks[1], L )
 
                 # 2. apply model loop over last dim
-                if isinstance(self.first_stage_model, VQModelInterface):  
+                if isinstance(self.first_stage_model, VQModelInterface):
                     output_list = [self.first_stage_model.decode(z[:, :, :, :, i],
                                                                  force_not_quantize=predict_cids or force_not_quantize)
                                    for i in range(z.shape[-1])]
@@ -802,7 +827,7 @@ class LatentDiffusion(DDPM):
                     output_list = [self.first_stage_model.decode(z[:, :, :, :, i])
                                    for i in range(z.shape[-1])]
 
-                o = torch.stack(output_list, axis=-1)  # # (bn, nc, ks[0], ks[1], L)
+                o = torch.stack(output_list, dim=-1)  # # (bn, nc, ks[0], ks[1], L)
                 o = o * weighting
                 # Reverse 1. reshape to img shape
                 o = o.view((o.shape[0], -1, o.shape[-1]))  # (bn, nc * ks[0] * ks[1], L)
@@ -847,7 +872,7 @@ class LatentDiffusion(DDPM):
                 output_list = [self.first_stage_model.encode(z[:, :, :, :, i])
                                for i in range(z.shape[-1])]
 
-                o = torch.stack(output_list, axis=-1)
+                o = torch.stack(output_list, dim=-1)
                 o = o * weighting
 
                 # Reverse reshape to img shape
@@ -873,6 +898,7 @@ class LatentDiffusion(DDPM):
             assert c is not None
             if self.cond_stage_trainable:
                 c = self.get_learned_conditioning(c)
+            assert isinstance(c, torch.Tensor)
             if self.shorten_cond_schedule:  # TODO: drop this option
                 tc = self.cond_ids[t].to(self.device)
                 c = self.q_sample(x_start=c, t=tc, noise=torch.randn_like(c.float()))
@@ -880,8 +906,8 @@ class LatentDiffusion(DDPM):
 
     def _rescale_annotations(self, bboxes, crop_coordinates):  # TODO: move to dataset
         def rescale_bbox(bbox):
-            x0 = clamp((bbox[0] - crop_coordinates[0]) / crop_coordinates[2])
-            y0 = clamp((bbox[1] - crop_coordinates[1]) / crop_coordinates[3])
+            x0 = torch.clamp((bbox[0] - crop_coordinates[0]) / crop_coordinates[2])
+            y0 = torch.clamp((bbox[1] - crop_coordinates[1]) / crop_coordinates[3])
             w = min(bbox[2] / crop_coordinates[2], 1 - x0)
             h = min(bbox[3] / crop_coordinates[3], 1 - y0)
             return x0, y0, w, h
@@ -901,7 +927,7 @@ class LatentDiffusion(DDPM):
 
         if hasattr(self, "split_input_params"):
             assert len(cond) == 1  # todo can only deal with one conditioning atm
-            assert not return_ids  
+            assert not return_ids
             ks = self.split_input_params["ks"]  # eg. (128, 128)
             stride = self.split_input_params["stride"]  # eg. (64, 64)
 
@@ -950,6 +976,7 @@ class LatentDiffusion(DDPM):
                 # patch_values = [(np.arange(x_tl,min(x_tl+ks, 1.)),np.arange(y_tl,min(y_tl+ks, 1.))) for x_tl, y_tl in tl_patch_coordinates]
 
                 # tokenize crop coordinates for the bounding boxes of the respective patches
+                assert self.bbox_tokenizer is not None, 'bbox_tokenizer must be set when using bbox conditioning'
                 patch_limits_tknzd = [torch.LongTensor(self.bbox_tokenizer._crop_encoder(bbox))[None].to(self.device)
                                       for bbox in patch_limits]  # list of length l with tensors of shape (1, 2)
                 print(patch_limits_tknzd[0].shape)
@@ -962,6 +989,7 @@ class LatentDiffusion(DDPM):
                 adapted_cond = rearrange(adapted_cond, 'l b n -> (l b) n')
                 print(adapted_cond.shape)
                 adapted_cond = self.get_learned_conditioning(adapted_cond)
+                assert isinstance(adapted_cond, torch.Tensor)
                 print(adapted_cond.shape)
                 adapted_cond = rearrange(adapted_cond, '(l b) n d -> l b n d', l=z.shape[-1])
                 print(adapted_cond.shape)
@@ -976,7 +1004,7 @@ class LatentDiffusion(DDPM):
             assert not isinstance(output_list[0],
                                   tuple)  # todo cant deal with multiple model outputs check this never happens
 
-            o = torch.stack(output_list, axis=-1)
+            o = torch.stack(output_list, dim=-1)
             o = o * weighting
             # Reverse reshape to img shape
             o = o.view((o.shape[0], -1, o.shape[-1]))  # (bn, nc * ks[0] * ks[1], L)
@@ -1009,7 +1037,7 @@ class LatentDiffusion(DDPM):
         kl_prior = normal_kl(mean1=qt_mean, logvar1=qt_log_variance, mean2=0.0, logvar2=0.0)
         return mean_flat(kl_prior) / np.log(2.0)
 
-    def p_losses(self, x_start, cond, t, noise=None):
+    def p_losses(self, x_start, cond, t, noise=None): # type: ignore
         noise = default(noise, lambda: torch.randn_like(x_start))
         x_noisy = self.q_sample(x_start=x_start, t=t, noise=noise)
         model_output = self.apply_model(x_noisy, t, cond)
@@ -1044,22 +1072,25 @@ class LatentDiffusion(DDPM):
 
         return loss, loss_dict
 
-    def p_mean_variance(self, x, c, t, clip_denoised: bool, return_codebook_ids=False, quantize_denoised=False,
-                        return_x0=False, score_corrector=None, corrector_kwargs=None):
+    def p_mean_variance(self, x, c, t, clip_denoised: bool, return_codebook_ids=False, quantize_denoised=False, # type: ignore
+                        return_x0=False, score_corrector=None, corrector_kwargs:dict|None=None):
         t_in = t
         model_out = self.apply_model(x, t_in, c, return_ids=return_codebook_ids)
 
         if score_corrector is not None:
             assert self.parameterization == "eps"
+            if corrector_kwargs is None:
+                corrector_kwargs = {}
             model_out = score_corrector.modify_score(self, model_out, x, t, c, **corrector_kwargs)
 
         if return_codebook_ids:
             model_out, logits = model_out
 
+        x_recon: torch.Tensor
         if self.parameterization == "eps":
             x_recon = self.predict_start_from_noise(x, t=t, noise=model_out)
         elif self.parameterization == "x0":
-            x_recon = model_out
+            x_recon = model_out # type: ignore
         else:
             raise NotImplementedError()
 
@@ -1069,14 +1100,14 @@ class LatentDiffusion(DDPM):
             x_recon, _, [_, _, indices] = self.first_stage_model.quantize(x_recon)
         model_mean, posterior_variance, posterior_log_variance = self.q_posterior(x_start=x_recon, x_t=x, t=t)
         if return_codebook_ids:
-            return model_mean, posterior_variance, posterior_log_variance, logits
+            return model_mean, posterior_variance, posterior_log_variance, logits # type: ignore
         elif return_x0:
             return model_mean, posterior_variance, posterior_log_variance, x_recon
         else:
             return model_mean, posterior_variance, posterior_log_variance
 
     @torch.no_grad()
-    def p_sample(self, x, c, t, clip_denoised=False, repeat_noise=False,
+    def p_sample(self, x, c, t, clip_denoised=False, repeat_noise=False, # type: ignore
                  return_codebook_ids=False, quantize_denoised=False, return_x0=False,
                  temperature=1., noise_dropout=0., score_corrector=None, corrector_kwargs=None):
         b, *_, device = *x.shape, x.device
@@ -1089,9 +1120,9 @@ class LatentDiffusion(DDPM):
             raise DeprecationWarning("Support dropped.")
             model_mean, _, model_log_variance, logits = outputs
         elif return_x0:
-            model_mean, _, model_log_variance, x0 = outputs
+            model_mean, *_, model_log_variance, x0 = outputs
         else:
-            model_mean, _, model_log_variance = outputs
+            model_mean, *_, model_log_variance = outputs
 
         noise = noise_like(x.shape, device, repeat_noise) * temperature
         if noise_dropout > 0.:
@@ -1100,9 +1131,10 @@ class LatentDiffusion(DDPM):
         nonzero_mask = (1 - (t == 0).float()).reshape(b, *((1,) * (len(x.shape) - 1)))
 
         if return_codebook_ids:
+            raise DeprecationWarning("Support dropped.")
             return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise, logits.argmax(dim=1)
         if return_x0:
-            return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise, x0
+            return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise, x0 # type: ignore # pylint: disable=E0606
         else:
             return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise
 
@@ -1136,13 +1168,14 @@ class LatentDiffusion(DDPM):
         iterator = tqdm(reversed(range(0, timesteps)), desc='Progressive Generation',
                         total=timesteps) if verbose else reversed(
             range(0, timesteps))
-        if type(temperature) == float:
+        if isinstance(temperature, float):
             temperature = [temperature] * timesteps
+        assert isinstance(temperature, list)
 
         for i in iterator:
             ts = torch.full((b,), i, device=self.device, dtype=torch.long)
             if self.shorten_cond_schedule:
-                assert self.model.conditioning_key != 'hybrid'
+                assert self.model.conditioning_key != 'hybrid' and isinstance(cond, torch.Tensor)
                 tc = self.cond_ids[ts].to(cond.device)
                 cond = self.q_sample(x_start=cond, t=tc, noise=torch.randn_like(cond))
 
@@ -1163,7 +1196,7 @@ class LatentDiffusion(DDPM):
         return img, intermediates
 
     @torch.no_grad()
-    def p_sample_loop(self, cond, shape, return_intermediates=False,
+    def p_sample_loop(self, cond, shape, return_intermediates=False, # type: ignore
                       x_T=None, verbose=True, callback=None, timesteps=None, quantize_denoised=False,
                       mask=None, x0=None, img_callback=None, start_T=None,
                       log_every_t=None):
@@ -1214,7 +1247,7 @@ class LatentDiffusion(DDPM):
         return img
 
     @torch.no_grad()
-    def sample(self, cond, batch_size=16, return_intermediates=False, x_T=None,
+    def sample(self, cond, batch_size=16, return_intermediates=False, x_T=None, # type: ignore
                verbose=True, timesteps=None, quantize_denoised=False,
                mask=None, x0=None, shape=None,**kwargs):
         if shape is None:
@@ -1248,14 +1281,14 @@ class LatentDiffusion(DDPM):
 
 
     @torch.no_grad()
-    def log_images(self, batch, N=8, n_row=4, sample=True, ddim_steps=200, ddim_eta=1., return_keys=None,
+    def log_images(self, batch, N=8, n_row=4, sample=True, ddim_steps=200, ddim_eta=1., return_keys=None, # type: ignore
                    quantize_denoised=True, inpaint=True, plot_denoise_rows=False, plot_progressive_rows=True,
                    plot_diffusion_rows=True, **kwargs):
 
         use_ddim = ddim_steps is not None
 
         log = dict()
-        z, c, x, xrec, xc = self.get_input(batch, self.first_stage_key,
+        z, c, x, xrec, xc = self.get_input(batch, self.first_stage_key, # pylint: disable=unbalanced-tuple-unpacking
                                            return_first_stage_outputs=True,
                                            force_c_encode=True,
                                            return_original_cond=True,
@@ -1265,7 +1298,7 @@ class LatentDiffusion(DDPM):
         log["inputs"] = x
         log["reconstruction"] = xrec
         if self.model.conditioning_key is not None:
-            if hasattr(self.cond_stage_model, "decode"):
+            if self.cond_stage_model is not None and hasattr(self.cond_stage_model, "decode"):
                 xc = self.cond_stage_model.decode(c)
                 log["conditioning"] = xc
             elif self.cond_stage_key in ["caption"]:
@@ -1318,6 +1351,7 @@ class LatentDiffusion(DDPM):
                                                              quantize_denoised=True)
                     # samples, z_denoise_row = self.sample(cond=c, batch_size=N, return_intermediates=True,
                     #                                      quantize_denoised=True)
+                    assert not isinstance(samples, tuple)
                 x_samples = self.decode_first_stage(samples.to(self.device))
                 log["samples_x0_quantized"] = x_samples
 
@@ -1332,6 +1366,7 @@ class LatentDiffusion(DDPM):
 
                     samples, _ = self.sample_log(cond=c,batch_size=N,ddim=use_ddim, eta=ddim_eta,
                                                 ddim_steps=ddim_steps, x0=z[:N], mask=mask)
+                assert not isinstance(samples, tuple)
                 x_samples = self.decode_first_stage(samples.to(self.device))
                 log["samples_inpainting"] = x_samples
                 log["mask"] = mask
@@ -1340,6 +1375,7 @@ class LatentDiffusion(DDPM):
                 with self.ema_scope("Plotting Outpaint"):
                     samples, _ = self.sample_log(cond=c, batch_size=N, ddim=use_ddim,eta=ddim_eta,
                                                 ddim_steps=ddim_steps, x0=z[:N], mask=mask)
+                assert not isinstance(samples, tuple)
                 x_samples = self.decode_first_stage(samples.to(self.device))
                 log["samples_outpainting"] = x_samples
 
@@ -1358,19 +1394,21 @@ class LatentDiffusion(DDPM):
                 return {key: log[key] for key in return_keys}
         return log
 
-    def configure_optimizers(self):
+    def configure_optimizers(self): # type: ignore
         lr = self.learning_rate
         params = list(self.model.parameters())
         if self.cond_stage_trainable:
+            assert self.cond_stage_model is not None
             print(f"{self.__class__.__name__}: Also optimizing conditioner params!")
             params = params + list(self.cond_stage_model.parameters())
         if self.learn_logvar:
             print('Diffusion model optimizing logvar')
-            params.append(self.logvar)
+            params.append(self.logvar) # type: ignore
         opt = torch.optim.AdamW(params, lr=lr)
         if self.use_scheduler:
-            assert 'target' in self.scheduler_config
+            assert self.scheduler_config is not None and 'target' in self.scheduler_config
             scheduler = instantiate_from_config(self.scheduler_config)
+            assert scheduler is not None
 
             print("Setting up LambdaLR scheduler...")
             scheduler = [
@@ -1387,7 +1425,7 @@ class LatentDiffusion(DDPM):
         x = x.float()
         if not hasattr(self, "colorize"):
             self.colorize = torch.randn(3, x.shape[1], 1, 1).to(x)
-        x = nn.functional.conv2d(x, weight=self.colorize)
+        x = nn.functional.conv2d(x, weight=self.colorize) # pylint: disable=not-callable
         x = 2. * (x - x.min()) / (x.max() - x.min()) - 1.
         return x
 
@@ -1399,20 +1437,24 @@ class DiffusionWrapper(pl.LightningModule):
         self.conditioning_key = conditioning_key
         assert self.conditioning_key in [None, 'concat', 'crossattn', 'hybrid', 'adm']
 
-    def forward(self, x, t, c_concat: list = None, c_crossattn: list = None):
+    def forward(self, x, t, c_concat: list | None = None, c_crossattn: list | None = None):
+        assert self.diffusion_model is not None
         if self.conditioning_key is None:
             out = self.diffusion_model(x, t)
         elif self.conditioning_key == 'concat':
+            assert c_concat is not None
             xc = torch.cat([x] + c_concat, dim=1)
             out = self.diffusion_model(xc, t)
         elif self.conditioning_key == 'crossattn':
             cc = torch.cat(c_crossattn, 1)
             out = self.diffusion_model(x, t, context=cc)
         elif self.conditioning_key == 'hybrid':
+            assert c_concat is not None
             xc = torch.cat([x] + c_concat, dim=1)
             cc = torch.cat(c_crossattn, 1)
             out = self.diffusion_model(xc, t, context=cc)
         elif self.conditioning_key == 'adm':
+            assert c_crossattn is not None
             cc = c_crossattn[0]
             out = self.diffusion_model(x, t, y=cc)
         else:
@@ -1427,15 +1469,15 @@ class Layout2ImgDiffusion(LatentDiffusion):
         assert cond_stage_key == 'coordinates_bbox', 'Layout2ImgDiffusion only for cond_stage_key="coordinates_bbox"'
         super().__init__(cond_stage_key=cond_stage_key, *args, **kwargs)
 
-    def log_images(self, batch, N=8, *args, **kwargs):
+    def log_images(self, batch, *args, N=8, **kwargs):
         logs = super().log_images(batch=batch, N=N, *args, **kwargs)
 
         key = 'train' if self.training else 'validation'
-        dset = self.trainer.datamodule.datasets[key]
+        dset = self.trainer.datamodule.datasets[key] # type: ignore
         mapper = dset.conditional_builders[self.cond_stage_key]
 
         bbox_imgs = []
-        map_fn = lambda catno: dset.get_textual_label(dset.get_category_id(catno))
+        def map_fn(catno): return dset.get_textual_label(dset.get_category_id(catno))
         for tknzd_bbox in batch[self.cond_stage_key][:N]:
             bboximg = mapper.plot(tknzd_bbox.detach().cpu(), map_fn, (256, 256))
             bbox_imgs.append(bboximg)

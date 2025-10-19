@@ -1,3 +1,5 @@
+# pylint: disable=unused-argument,unused-variable
+
 # pytorch_diffusion + derived encoder decoder
 import math
 import torch
@@ -75,7 +77,7 @@ class Downsample(nn.Module):
             x = torch.nn.functional.pad(x, pad, mode="constant", value=0)
             x = self.conv(x)
         else:
-            x = torch.nn.functional.avg_pool2d(x, kernel_size=2, stride=2)
+            x = torch.nn.functional.avg_pool2d(x, kernel_size=2, stride=2) # pylint: disable=not-callable
         return x
 
 
@@ -214,7 +216,7 @@ def make_attn(in_channels, attn_type="vanilla"):
 
 
 class Model(nn.Module):
-    def __init__(self, *, ch, out_ch, ch_mult=(1,2,4,8), num_res_blocks,
+    def __init__(self, *, ch:int, out_ch:int, ch_mult:tuple[int, ...]=(1,2,4,8), num_res_blocks:int,
                  attn_resolutions, dropout=0.0, resamp_with_conv=True, in_channels,
                  resolution, use_timestep=True, use_linear_attn=False, attn_type="vanilla"):
         super().__init__()
@@ -244,6 +246,7 @@ class Model(nn.Module):
                                        stride=1,
                                        padding=1)
 
+        block_in = 1
         curr_res = resolution
         in_ch_mult = (1,)+tuple(ch_mult)
         self.down = nn.ModuleList()
@@ -315,6 +318,7 @@ class Model(nn.Module):
 
     def forward(self, x, t=None, context=None):
         #assert x.shape[2] == x.shape[3] == self.resolution
+        assert isinstance(self.temb.dense, nn.ModuleList)
         if context is not None:
             # assume aligned context, cat along channel axis
             x = torch.cat((x, context), dim=1)
@@ -752,13 +756,13 @@ class Resize(nn.Module):
         if self.with_conv:
             print(f"Note: {self.__class__.__name} uses learned downsampling and will ignore the fixed {mode} mode")
             raise NotImplementedError()
-            assert in_channels is not None
-            # no asymmetric padding in torch conv, must do it ourselves
-            self.conv = torch.nn.Conv2d(in_channels,
-                                        in_channels,
-                                        kernel_size=4,
-                                        stride=2,
-                                        padding=1)
+            # assert in_channels is not None
+            # # no asymmetric padding in torch conv, must do it ourselves
+            # self.conv = torch.nn.Conv2d(in_channels,
+            #                             in_channels,
+            #                             kernel_size=4,
+            #                             stride=2,
+            #                             padding=1)
 
     def forward(self, x, scale_factor=1.0):
         if scale_factor==1.0:
@@ -815,7 +819,7 @@ class FirstStagePostProcessor(nn.Module):
     @torch.no_grad()
     def encode_with_pretrained(self,x):
         c = self.pretrained_model.encode(x)
-        if isinstance(c, DiagonalGaussianDistribution):
+        if isinstance(c, DiagonalGaussianDistribution): # type: ignore # pylint: disable=undefined-variable
             c = c.mode()
         return  c
 
@@ -832,4 +836,3 @@ class FirstStagePostProcessor(nn.Module):
         if self.do_reshape:
             z = rearrange(z,'b c h w -> b (h w) c')
         return z
-
